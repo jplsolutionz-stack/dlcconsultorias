@@ -1,676 +1,370 @@
 /* =========================================================
-   DLC — comportamento da landing page
+   DLC — comportamento das páginas (início, sobre, clientes)
+   Cada bloco confere se os elementos existem e roda isolado:
+   uma falha em um deles não esconde o resto da página.
    ========================================================= */
 
-// Sinaliza ao <head> que o script carregou (senão a página volta ao modo sem animação).
-window.__dlc = true;
+(() => {
+'use strict';
+
+const WHATSAPP = '5531973170620';
 
 /*
-  CONFIGURAÇÃO
-  whatsapp:     número com DDI e DDD, só dígitos. Os links e o envio do
-                formulário usam este número.
-  formEndpoint: opcional. URL que recebe o formulário via POST (JSON), por
-                exemplo Formspree ou uma rota própria. Se preenchido, o
-                formulário envia para cá em vez de abrir o WhatsApp.
-  responseTime: opcional. Prazo de resposta exibido após o envio por
-                endpoint (ex.: '1 dia útil').
+  Menos movimento: quando o sistema pede, saem os deslocamentos, os giros e
+  o parallax; ficam os fades e as cores. ?motion=full no endereço força a
+  experiência completa (útil para testar).
 */
-const CONFIG = {
-  whatsapp: '5531973170620',
-  formEndpoint: '',
-  responseTime: '',
-};
-
-/*
-  Movimento reduzido: quando o sistema pede menos animação, tiramos o que
-  desloca a tela (parallax, deslizamentos, cabeçalho que some) e mantemos
-  fades, cores e o progresso do Ciclo, que acompanha a rolagem da pessoa.
-  ?motion=full no endereço força a experiência completa (útil para testar).
-*/
+const root = document.documentElement;
 const prefersReduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const forceFull = new URLSearchParams(window.location.search).get('motion') === 'full';
 const reduceMotion = prefersReduce && !forceFull;
-document.documentElement.classList.toggle('rm', reduceMotion);
-document.documentElement.classList.toggle('motion-ok', prefersReduce && forceFull);
+root.classList.toggle('rm', reduceMotion);
+root.classList.toggle('motion-ok', prefersReduce && forceFull);
+const finePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
-const $ = (s, root = document) => root.querySelector(s);
-const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-const onMedia = (mq, fn) => {
-  if (mq.addEventListener) mq.addEventListener('change', fn);
-  else if (mq.addListener) mq.addListener(fn); // Safari < 14
-};
+const run = (name, fn) => { try { fn(); } catch (err) { console.error(`[dlc] ${name}`, err); } };
 
-/* ---------- Divide textos em palavras ---------- */
-// O texto completo fica num span .sr-only para leitores de tela e tradutores;
-// as palavras animadas ficam escondidas da árvore de acessibilidade.
-function splitWords(el, wrap, { hideWords = true } = {}) {
-  const text = el.textContent.trim().replace(/\s+/g, ' ');
-  el.textContent = '';
-  text.split(' ').forEach((word, i, arr) => {
-    const node = wrap(word, i);
-    if (hideWords) node.setAttribute('aria-hidden', 'true');
-    el.appendChild(node);
-    if (i < arr.length - 1) el.appendChild(document.createTextNode(' '));
-  });
-  if (hideWords) {
-    const sr = document.createElement('span');
-    sr.className = 'sr-only';
-    sr.textContent = text;
-    el.appendChild(sr);
-  }
-  el.setAttribute('data-ready', '');
-}
-
-$$('[data-split]').forEach((el) => splitWords(el, (word, i) => {
-  const outer = document.createElement('span');
-  outer.className = 'w';
-  const inner = document.createElement('span');
-  inner.className = 'w-in';
-  inner.style.setProperty('--wi', i);
-  inner.textContent = word;
-  outer.appendChild(inner);
-  return outer;
-}));
-
-// Frases que "acendem" com a rolagem: as palavras só mudam de cor, então continuam
-// legíveis por leitores de tela. Divide só os nós de texto, preservando o <span class="mark">.
-function splitTextNodes(el) {
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  const nodes = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-  nodes.forEach((node) => {
-    const frag = document.createDocumentFragment();
-    node.textContent.split(/(\s+)/).forEach((part) => {
-      if (!part) return;
-      if (/^\s+$/.test(part)) { frag.appendChild(document.createTextNode(part)); return; }
-      const span = document.createElement('span');
-      span.className = 'cw';
-      span.textContent = part;
-      frag.appendChild(span);
+/* ---------- Texto em palavras: títulos que sobem e frases que acendem ---------- */
+function splitWords(el, masked) {
+  let count = 0;
+  const walk = (node) => {
+    [...node.childNodes].forEach((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const frag = document.createDocumentFragment();
+        child.textContent.split(/([ \n\t]+)/).forEach((part) => {
+          if (!part) return;
+          if (/^[ \n\t]+$/.test(part)) { frag.append(' '); return; }
+          const word = document.createElement('span');
+          word.textContent = part;
+          word.style.setProperty('--w', count);
+          count += 1;
+          if (masked) {
+            word.className = 'wi';
+            const mask = document.createElement('span');
+            mask.className = 'w';
+            mask.append(word);
+            frag.append(mask);
+          } else {
+            word.className = 'hw';
+            frag.append(word);
+          }
+        });
+        child.replaceWith(frag);
+      } else if (child.nodeType === Node.ELEMENT_NODE && child.tagName !== 'BR') {
+        walk(child);
+      }
     });
-    node.replaceWith(frag);
-  });
+  };
+  walk(el);
+  el.style.setProperty('--n', count);
 }
-$$('[data-words]').forEach(splitTextNodes);
-
-/* ---------- Dobra: entra ao carregar ---------- */
-// Força o cálculo do estado inicial e então liga a transição; não depende de
-// requestAnimationFrame, que fica pausado em abas abertas em segundo plano.
-const heroEls = $$('.hero [data-split], .hero [data-portrait]');
-heroEls.forEach((el) => getComputedStyle(el).opacity);
-void document.body.offsetWidth;
-heroEls.forEach((el) => el.classList.add('is-in'));
-
-/* ---------- Revelação ao rolar ---------- */
-$$('[data-reveal-group]').forEach((group) => {
-  [...group.children].forEach((child, i) => child.style.setProperty('--d', i));
+run('palavras', () => {
+  $$('[data-split]').forEach((el) => { splitWords(el, true); el.classList.add('is-split'); });
+  $$('[data-words]').forEach((el) => splitWords(el, false));
 });
 
-const revealTargets = [
-  ...$$('[data-reveal]'),
-  ...$$('[data-reveal-group] > *'),
-  ...$$('[data-split]').filter((el) => !el.closest('.hero')),
-];
+/* ---------- Menu no celular ---------- */
+const topBar = $('[data-top]');
+const menuToggle = $('[data-menu-toggle]');
+const menu = $('[data-menu]');
+const menuOpen = () => Boolean(menu && !menu.hidden);
+run('menu', () => {
+  if (!menuToggle || !menu) return;
+  const setMenu = (open) => {
+    menuToggle.setAttribute('aria-expanded', String(open));
+    menuToggle.textContent = open ? 'Fechar' : 'Menu';
+    menu.hidden = !open;
+  };
+  menuToggle.addEventListener('click', () => setMenu(menu.hidden));
+  menu.addEventListener('click', (e) => { if (e.target.closest('a')) setMenu(false); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !menu.hidden) { setMenu(false); menuToggle.focus(); }
+  });
+});
 
-if (!('IntersectionObserver' in window)) {
-  revealTargets.forEach((el) => el.classList.add('is-in'));
-} else {
-  const revealObserver = new IntersectionObserver((entries) => {
+/* ---------- Dobra: o título sobe, o globo abre, os pontos entram em órbita ---------- */
+const hero = $('[data-hero]');
+run('dobra', () => {
+  if (!hero) return;
+  void hero.offsetWidth;   // fixa o estado inicial antes da transição
+  window.setTimeout(() => {
+    hero.classList.add('is-in');
+    $$('[data-split], [data-in]', hero).forEach((el) => el.classList.add('is-in'));
+  }, 40);
+});
+
+/* ---------- Entradas: cada parte aparece uma vez, ao entrar na tela ---------- */
+run('entradas', () => {
+  $$('[data-in-group]').forEach((group) => {
+    [...group.children].forEach((child, i) => child.style.setProperty('--d', i));
+  });
+  const entering = [...$$('[data-in]'), ...$$('[data-split]'), ...$$('[data-in-group] > *')];
+  if (!('IntersectionObserver' in window)) { entering.forEach((el) => el.classList.add('is-in')); return; }
+  const io = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
       if (!entry.isIntersecting) return;
       entry.target.classList.add('is-in');
-      revealObserver.unobserve(entry.target);
+      io.unobserve(entry.target);
     });
-  }, { threshold: 0.12, rootMargin: '0px 0px -6% 0px' });
-  revealTargets.forEach((el) => revealObserver.observe(el));
-}
+  }, { threshold: 0.1, rootMargin: '0px 0px -5% 0px' });
+  entering.forEach((el) => io.observe(el));
 
-/* ---------- Referências ---------- */
-const header = $('[data-header]');
-const progressBar = $('[data-scroll-progress]');
-const toggle = $('[data-menu-toggle]');
-const menu = $('[data-menu]');
-const main = $('main');
-const footer = $('.site-footer');
-const bar = $('[data-mobile-bar]');
-const hero = $('.hero');
-const finalSection = $('#solicitar');
-let lastY = window.scrollY;
-
-/* ---------- Menu no celular ---------- */
-const menuOpen = () => toggle.getAttribute('aria-expanded') === 'true';
-
-function setMenu(open) {
-  toggle.setAttribute('aria-expanded', String(open));
-  $('.menu-toggle-label', toggle).textContent = open ? 'Fechar' : 'Menu';
-  menu.hidden = !open;
-  menu.classList.toggle('is-open', open);
-  document.body.style.overflow = open ? 'hidden' : '';
-  // Com o menu aberto, o resto da página fica fora do alcance do Tab e do leitor de tela.
-  main.inert = open;
-  footer.inert = open;
-  if (window.__lenis) { if (open) window.__lenis.stop(); else window.__lenis.start(); }
-  if (open) {
-    bar.inert = true;
-    header.classList.remove('is-hidden');
-    $('a', menu).focus({ preventScroll: true });
-  } else {
-    requestFrame();
-  }
-}
-toggle.addEventListener('click', () => setMenu(!menuOpen()));
-menu.addEventListener('click', (e) => { if (e.target.closest('a')) setMenu(false); });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && menuOpen()) { setMenu(false); toggle.focus(); }
-});
-onMedia(window.matchMedia('(min-width: 1024px)'), (e) => { if (e.matches && menuOpen()) setMenu(false); });
-
-/* ---------- WhatsApp ---------- */
-const waMessage = 'Olá, quero um diagnóstico ISO gratuito.';
-const waUrl = (text) => `https://wa.me/${CONFIG.whatsapp}?text=${encodeURIComponent(text)}`;
-$$('[data-whatsapp]').forEach((link) => {
-  if (!CONFIG.whatsapp) return;
-  link.href = waUrl(waMessage);
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.hidden = false;
-});
-
-/* ---------- Ciclo DLC ---------- */
-const cycle = $('[data-cycle]');
-const stepItems = $$('[data-step-item]');
-const stepsList = $('.steps');
-const cycleProgress = $('[data-cycle-progress]');
-const cycleNodes = $$('.cycle-node');
-const cycleCenter = $('.cycle-center');
-const cycleNum = $('[data-cycle-num]');
-const cycleLabel = $('[data-cycle-label]');
-let currentStep = -1;
-let swapTimer = 0;
-
-function paintCenter(index) {
-  cycleNum.textContent = String(index + 1).padStart(2, '0');
-  cycleLabel.textContent = $('h3', stepItems[index]).textContent;
-}
-
-function setStep(index) {
-  if (index === currentStep) return;
-  const first = currentStep < 0;
-  currentStep = index;
-  stepItems.forEach((item, i) => {
-    item.classList.toggle('is-active', i === index);
-    item.classList.toggle('is-done', i < index);
-  });
-  cycleNodes.forEach((node, i) => {
-    node.classList.toggle('is-on', i <= index);
-    node.classList.toggle('is-current', i === index);
-  });
-  window.clearTimeout(swapTimer);
-  if (first || reduceMotion) {
-    cycleCenter.classList.remove('is-swapping');
-    paintCenter(index);
-    return;
-  }
-  // Uma única troca, mesmo se a pessoa passar por várias etapas de uma vez.
-  cycleCenter.classList.add('is-swapping');
-  swapTimer = window.setTimeout(() => {
-    paintCenter(currentStep);
-    cycleCenter.classList.remove('is-swapping');
-  }, 220);
-}
-
-/* ---------- Elementos ligados à rolagem ---------- */
-// Com GSAP + ScrollTrigger carregados, eles cuidam do que é ligado à rolagem;
-// sem eles (arquivo bloqueado ou com erro), o cálculo manual abaixo assume.
-const useGsap = !!(window.gsap && window.ScrollTrigger);
-const parallaxEls = reduceMotion ? [] : $$('[data-parallax]');
-const navLinks = $$('.nav a');
-const navSections = navLinks.map((a) => $(a.getAttribute('href'))).filter(Boolean);
-const wordBlocks = $$('[data-words]').map((el) => ({ el, words: $$('.cw', el), mark: $('.mark', el) }));
-const stripItems = $$('[data-strip] li');
-const inlineCtas = $$('main a.btn[href="#solicitar"]');
-
-function lightWords(block, p) {
-  const count = Math.round(p * block.words.length);
-  block.words.forEach((w, i) => w.classList.toggle('is-on', i < count));
-  if (block.mark) block.mark.classList.toggle('is-on', count >= block.words.length);
-}
-
-function cycleFromProgress(p, anchor) {
-  if (cycleProgress) cycleProgress.style.setProperty('--offset', (1 - p).toFixed(4));
-  stepsList.style.setProperty('--p', p.toFixed(4));
-  let active = 0;
-  stepItems.forEach((item, i) => { if (item.getBoundingClientRect().top <= anchor) active = i; });
-  setStep(active);
-}
-
-// Foco de teclado no cabeçalho (cliques de mouse não contam).
-const kbFocusInHeader = () => {
-  try { return !!header.querySelector(':focus-visible'); } catch { return header.contains(document.activeElement); }
-};
-header.addEventListener('focusin', () => header.classList.remove('is-hidden'));
-
-function onScrollFrame() {
-  const y = window.scrollY;
-  const vh = window.innerHeight;
-
-  // Cabeçalho
-  const goingDown = y > lastY + 4;
-  const goingUp = y < lastY - 4;
-  if (!reduceMotion && !menuOpen()) {
-    if (kbFocusInHeader()) header.classList.remove('is-hidden');
-    else if (goingDown && y > 280) header.classList.add('is-hidden');
-    else if (goingUp || y < 280) header.classList.remove('is-hidden');
-  }
-  lastY = y;
-
-  // Sem GSAP: barra de leitura, parallax, Ciclo, faixa e palavras calculados aqui
-  if (!useGsap) {
-    const max = document.documentElement.scrollHeight - vh;
-    if (progressBar) progressBar.style.setProperty('--progress', max > 0 ? (y / max).toFixed(4) : 0);
-    parallaxEls.forEach((el) => {
+  // Rede de segurança: se o observador falhar, um relógio revela o que ficou na tela
+  // por duas checagens seguidas. Em condições normais o observador chega antes
+  // e a entrada animada acontece como desenhada.
+  let pending = entering.slice();
+  const seen = new WeakSet();
+  const sweep = window.setInterval(() => {
+    const vh = window.innerHeight;
+    pending = pending.filter((el) => {
+      if (el.classList.contains('is-in')) return false;
       const r = el.getBoundingClientRect();
-      if (r.bottom < -200 || r.top > vh + 200) return;
-      const factor = parseFloat(el.dataset.parallax) || 0;
-      el.style.setProperty('--py', `${((r.top + r.height / 2 - vh / 2) * factor).toFixed(1)}px`);
+      const inView = r.top < vh * 0.96 && r.bottom > 0;
+      if (!inView) { seen.delete(el); return true; }
+      if (!seen.has(el)) { seen.add(el); return true; }
+      el.classList.add('is-in');
+      io.unobserve(el);
+      return false;
     });
-    if (cycle && stepItems.length) {
-      const first = stepItems[0].getBoundingClientRect();
-      const last = stepItems[stepItems.length - 1].getBoundingClientRect();
-      const anchor = vh * 0.55;
-      cycleFromProgress(clamp((anchor - first.top) / (last.bottom - first.top), 0, 1), anchor);
-    }
-    wordBlocks.forEach((b) => {
-      const r = b.el.getBoundingClientRect();
-      lightWords(b, clamp((vh * 0.85 - r.top) / (vh * 0.5), 0, 1));
-    });
-  }
+    if (!pending.length) window.clearInterval(sweep);
+  }, 700);
+});
 
-  // Navegação ativa
-  const mid = vh * 0.5;
-  let current = null;
-  navSections.forEach((s) => { if (s.getBoundingClientRect().top <= mid) current = s; });
-  if (finalSection.getBoundingClientRect().top <= mid) current = null;
-  navLinks.forEach((a) => {
-    if (current && a.getAttribute('href') === `#${current.id}`) a.setAttribute('aria-current', 'true');
-    else a.removeAttribute('aria-current');
+/* ---------- Ligado à rolagem ----------
+   Cada elemento marcado recebe --p (0 a 1) conforme a posição na tela; o CSS
+   usa esse valor para girar, deslocar e acender. O valor persegue o alvo aos
+   poucos, então o movimento continua macio mesmo com a roda do mouse. */
+run('rolagem', () => {
+  const tracked = [];
+  $$('[data-p]').forEach((el) => {
+    const mode = el.dataset.p;
+    let compute;
+    if (mode === 'exit') compute = (r) => -r.top / Math.max(1, r.height);
+    else if (mode === 'enter') compute = (r, vh) => (vh * 0.92 - r.top) / (vh * 0.5);
+    else compute = (r, vh) => (vh - r.top) / (vh + r.height);
+    tracked.push({ el, compute, cur: null, last: null, target: 0 });
   });
 
-  // Barra fixa no celular: some na dobra, no formulário e quando já há um botão igual na tela
-  if (bar && !menuOpen()) {
-    const pastHero = hero.getBoundingClientRect().bottom < 0;
-    const atForm = finalSection.getBoundingClientRect().top < vh * 0.9;
-    const inlineCta = inlineCtas.some((b) => { const r = b.getBoundingClientRect(); return r.top < vh && r.bottom > 0; });
-    const visible = pastHero && !atForm && !inlineCta;
-    bar.classList.toggle('is-visible', visible);
-    bar.inert = !visible;
-  }
-}
-
-let framePending = false;
-function requestFrame() {
-  if (framePending) return;
-  framePending = true;
-  requestAnimationFrame(() => { framePending = false; onScrollFrame(); });
-}
-window.addEventListener('scroll', requestFrame, { passive: true });
-window.addEventListener('resize', requestFrame);
-onScrollFrame();
-
-/* =========================================================
-   Movimento com GSAP + ScrollTrigger + Lenis (especificação no Figma)
-   ========================================================= */
-if (useGsap) {
-  const { gsap, ScrollTrigger } = window;
-  gsap.registerPlugin(ScrollTrigger);
-  const ease = 'expo.out';
-
-  // Rolagem fluida — só quando o sistema não pede menos movimento
-  if (!reduceMotion && window.Lenis) {
-    const lenis = new window.Lenis({
-      duration: 1.15,
-      easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
-      anchors: { offset: -88 },
-      smoothWheel: true,
+  // Topo: some ao descer, volta ao subir; marca a seção atual (só links de âncora)
+  const navLinks = $$('.top-nav a').filter((a) => (a.getAttribute('href') || '').startsWith('#'));
+  const navSections = navLinks.map((a) => document.getElementById(a.getAttribute('href').slice(1))).filter(Boolean);
+  const closing = $('#contato');
+  let lastY = window.scrollY;
+  const updateChrome = (vh) => {
+    if (!topBar) return;
+    const y = window.scrollY;
+    topBar.classList.toggle('is-scrolled', y > 16);
+    const keep = menuOpen() || topBar.contains(document.activeElement) || y < 240;
+    if (keep || y < lastY - 4) topBar.classList.remove('is-hidden');
+    else if (y > lastY + 4) topBar.classList.add('is-hidden');
+    lastY = y;
+    if (!navSections.length) return;
+    const mid = vh * 0.5;
+    let current = null;
+    navSections.forEach((s) => { if (s.getBoundingClientRect().top <= mid) current = s; });
+    if (closing && closing.getBoundingClientRect().top <= mid) current = null;
+    navLinks.forEach((a) => {
+      if (current && a.getAttribute('href') === `#${current.id}`) a.setAttribute('aria-current', 'true');
+      else a.removeAttribute('aria-current');
     });
-    window.__lenis = lenis;
-    lenis.on('scroll', ScrollTrigger.update);
-    gsap.ticker.add((time) => lenis.raf(time * 1000));
-    gsap.ticker.lagSmoothing(0);
-  }
+  };
+  if (topBar) topBar.addEventListener('focusin', () => topBar.classList.remove('is-hidden'));
 
-  // Vinculado: barra de leitura
-  if (progressBar) {
-    ScrollTrigger.create({
-      start: 0,
-      end: 'max',
-      onUpdate: (self) => progressBar.style.setProperty('--progress', self.progress.toFixed(4)),
+  const update = (immediate) => {
+    const vh = window.innerHeight;
+    // 1) medir tudo
+    tracked.forEach((t) => { t.target = clamp(t.compute(t.el.getBoundingClientRect(), vh), 0, 1); });
+    updateChrome(vh);
+    // 2) só então escrever
+    let moving = false;
+    tracked.forEach((t) => {
+      if (t.cur === null || immediate || reduceMotion) t.cur = t.target;
+      else {
+        const d = t.target - t.cur;
+        if (Math.abs(d) < 0.0006) t.cur = t.target;
+        else { t.cur += d * 0.16; moving = true; }
+      }
+      if (t.cur !== t.last) { t.el.style.setProperty('--p', t.cur.toFixed(4)); t.last = t.cur; }
     });
-  }
+    return moving;
+  };
+  let running = false;
+  const loop = () => { running = update(false); if (running) requestAnimationFrame(loop); };
+  const kick = () => { if (running) return; running = true; requestAnimationFrame(loop); };
+  window.addEventListener('scroll', kick, { passive: true });
+  window.addEventListener('resize', kick);
+  update(true);
+});
 
-  // Vinculado: faixa do Ciclo na dobra — as linhas enchem até o método chegar
-  if (stripItems.length) {
-    ScrollTrigger.create({
-      trigger: '[data-strip]',
-      start: 'top 85%',
-      endTrigger: '#metodo',
-      end: 'top 40%',
-      onUpdate: (self) => {
-        const p = self.progress * stripItems.length;
-        stripItems.forEach((li, i) => {
-          const fill = clamp(p - i, 0, 1);
-          li.style.setProperty('--fill', fill.toFixed(3));
-          li.classList.toggle('is-reached', fill > 0.02);
-        });
-      },
-    });
-  }
+/* ---------- Método: a roda gira sozinha e o passo ativo acompanha ---------- */
+run('ciclo', () => {
+  const cycle = $('[data-cycle]');
+  if (!cycle) return;
+  const steps = $$('.cycle-steps li', cycle);
+  const dots = $$('.wheel-dot', cycle);
+  if (!steps.length) return;
+  if (reduceMotion) { dots.forEach((dot) => dot.classList.add('is-on')); return; }
 
-  // Vinculado: frases que acendem palavra por palavra
-  wordBlocks.forEach((b) => {
-    ScrollTrigger.create({
-      trigger: b.el,
-      start: 'top 85%',
-      end: 'bottom 45%',
-      onUpdate: (self) => lightWords(b, self.progress),
-    });
-  });
+  const LOOP = 16000;   // uma volta completa
+  let p = 0;            // posição na volta, 0 a 1
+  let current = -1;     // passo ativo
+  let turns = 0;        // contador que só cresce, para o arco andar sempre para a frente
+  let held = -1;        // passo sob o mouse
+  let visible = false;
+  let last = 0;
+  let raf = 0;
 
-  // Vinculado: Ciclo DLC — círculo, nós e etapa ativa seguem a rolagem
-  if (cycle && stepItems.length) {
-    ScrollTrigger.create({
-      trigger: stepItems[0],
-      start: 'top 55%',
-      endTrigger: stepItems[stepItems.length - 1],
-      end: 'bottom 55%',
-      onUpdate: (self) => cycleFromProgress(self.progress, window.innerHeight * 0.55),
-      onRefresh: (self) => cycleFromProgress(self.progress, window.innerHeight * 0.55),
-    });
-  }
+  const setStep = (s) => {
+    if (s === current) return;
+    turns += current < 0 ? s : (s - current + steps.length) % steps.length;
+    current = s;
+    cycle.style.setProperty('--s', turns);
+    steps.forEach((li, i) => li.classList.toggle('is-active', i === s));
+    dots.forEach((dot, i) => dot.classList.toggle('is-on', i === s));
+  };
+  const frame = (now) => {
+    raf = 0;
+    if (!visible) return;
+    if (last && held < 0) p = (p + (now - last) / LOOP) % 1;
+    last = now;
+    cycle.style.setProperty('--p', p.toFixed(4));
+    setStep(Math.min(steps.length - 1, Math.floor(p * steps.length)));
+    raf = requestAnimationFrame(frame);
+  };
+  const start = () => { if (!raf) { last = 0; raf = requestAnimationFrame(frame); } };
 
-  if (!reduceMotion) {
-    // Parallax: arco da dobra desce devagar; foto assenta; símbolo do final sobe devagar
-    const arcHero = $('.portrait-arc');
-    if (arcHero) {
-      gsap.to(arcHero, {
-        '--py': '90px',
-        ease: 'none',
-        scrollTrigger: { trigger: '.portrait', start: 'top top', end: 'bottom top', scrub: true },
-      });
-    }
-    gsap.fromTo('.portrait-frame', { yPercent: 0 }, {
-      yPercent: -6,
-      ease: 'none',
-      scrollTrigger: { trigger: '.hero', start: 'top top', end: 'bottom top', scrub: true },
-    });
-    const mark = $('.final-mark');
-    if (mark) {
-      gsap.fromTo(mark, { '--py': '120px' }, {
-        '--py': '-60px',
-        ease: 'none',
-        scrollTrigger: { trigger: '.final', start: 'top bottom', end: 'bottom top', scrub: true },
-      });
-    }
+  cycle.classList.add('is-live');
+  setStep(0);
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; if (visible) start(); }, { threshold: 0.2 }).observe(cycle);
+  } else { visible = true; start(); }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && visible) start(); });
 
-    // Vinculado: o "custo de esperar" desliza devagar na horizontal
-    const drift = $('[data-drift]');
-    if (drift) {
-      gsap.fromTo(drift, { xPercent: 6 }, {
-        xPercent: -2,
-        ease: 'none',
-        scrollTrigger: { trigger: '.cost', start: 'top bottom', end: 'bottom top', scrub: 0.6 },
-      });
-    }
-
-    // Gatilho: seções escuras e verdes entram com leve escala, sem atrasar o conteúdo
-    gsap.utils.toArray('.urgency, .final .form-panel').forEach((el) => {
-      gsap.from(el, {
-        scale: 0.97,
-        opacity: 0.6,
-        duration: 1.1,
-        ease,
-        scrollTrigger: { trigger: el, start: 'top 90%', once: true },
-      });
-    });
-  }
-
-  // Fontes e imagens mudam alturas: recalcula posições quando terminam de carregar
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => ScrollTrigger.refresh());
-  window.addEventListener('load', () => ScrollTrigger.refresh());
-}
-
-/* ---------- FAQ com abertura suave ---------- */
-$$('.faq details').forEach((details) => {
-  const summary = $('summary', details);
-  const body = $('.faq-body', details);
-  let anim = null;
-  let closing = false;
-
-  summary.addEventListener('click', (e) => {
-    if (reduceMotion || !body.animate) return;
-    e.preventDefault();
-
-    // Parte da altura atual, para inverter no meio da animação sem saltos.
-    const fromH = details.open ? body.getBoundingClientRect().height : 0;
-    const fromO = details.open ? Number(getComputedStyle(body).opacity) : 0;
-    const opening = !details.open || closing;
-    if (anim) anim.cancel();
-
-    if (opening) {
-      closing = false;
-      details.open = true;
-      anim = body.animate(
-        [{ height: `${fromH}px`, opacity: fromO }, { height: `${body.scrollHeight}px`, opacity: 1 }],
-        { duration: 420, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
-      );
-      anim.onfinish = () => { anim = null; if (window.ScrollTrigger) window.ScrollTrigger.refresh(); };
-    } else {
-      closing = true;
-      anim = body.animate(
-        [{ height: `${fromH}px`, opacity: fromO }, { height: '0px', opacity: 0 }],
-        { duration: 280, easing: 'cubic-bezier(0.55, 0, 1, 0.45)' },
-      );
-      anim.onfinish = () => { details.open = false; closing = false; anim = null; if (window.ScrollTrigger) window.ScrollTrigger.refresh(); };
-    }
+  // passar o mouse em um passo leva a roda até ele
+  steps.forEach((li, i) => {
+    li.addEventListener('pointerenter', () => { held = i; p = (i + 0.5) / steps.length; });
+    li.addEventListener('pointerleave', () => { held = -1; });
   });
 });
 
-/* ---------- Formulário em 2 passos ---------- */
-const form = $('[data-form]');
-const step1 = $('[data-step="1"]', form);
-const step2 = $('[data-step="2"]', form);
-const radios = $$('input[name="norma"]', form);
-const normError = $('#norma-error');
-const chosenNorm = $('[data-chosen-norm]', form);
-const status = $('[data-status]', form);
-const submitBtn = $('[data-submit]', form);
-const formMicro = $('[data-form-micro]', form);
-const success = $('[data-success]');
-const formProgress = $('[data-progress]');
-
-// O texto do botão diz o que acontece de fato ao enviar.
-if (!CONFIG.formEndpoint && CONFIG.whatsapp) {
-  submitBtn.textContent = 'Enviar pedido pelo WhatsApp';
-  formMicro.textContent = 'Sem custo e sem compromisso. O WhatsApp abre com sua mensagem pronta; o pedido chega quando você toca em enviar.';
-}
-
-function showStep(next, prev, progress) {
-  prev.hidden = true;
-  next.hidden = false;
-  formProgress.style.setProperty('--step-p', progress);
-  if (!reduceMotion) {
-    next.classList.remove('is-entering');
-    void next.offsetWidth;
-    next.classList.add('is-entering');
-  }
-}
-
-function clearNormError() {
-  normError.hidden = true;
-  radios.forEach((r) => { r.removeAttribute('aria-invalid'); r.removeAttribute('aria-describedby'); });
-}
-
-function goToStep2() {
-  const picked = $('input[name="norma"]:checked', form);
-  if (!picked) {
-    radios.forEach((r) => { r.setAttribute('aria-invalid', 'true'); r.setAttribute('aria-describedby', 'norma-error'); });
-    normError.hidden = false;
-    radios[0].focus();
-    return;
-  }
-  clearNormError();
-  chosenNorm.textContent = picked.value;
-  showStep(step2, step1, 0.85);
-  $('#f-nome').focus({ preventScroll: true });
-}
-
-$('[data-next]', form).addEventListener('click', goToStep2);
-radios.forEach((r) => r.addEventListener('change', clearNormError));
-
-$('[data-back]', form).addEventListener('click', () => {
-  showStep(step1, step2, 0.5);
-  ($('input[name="norma"]:checked', form) || radios[0]).focus();
+/* ---------- Atalhos das normas: levam à seção e destacam o cartão certo ---------- */
+run('atalhos', () => {
+  $$('[data-card]').forEach((link) => {
+    link.addEventListener('click', () => {
+      const card = document.getElementById(link.dataset.card);
+      if (!card) return;
+      window.setTimeout(() => {
+        card.classList.toggle('is-ping', false);
+        void card.offsetWidth;
+        card.classList.toggle('is-ping', true);
+      }, reduceMotion ? 0 : 500);
+    });
+  });
 });
 
-// Links "Diagnóstico para ISO ..." na seção de normas já marcam a norma no formulário.
-$$('[data-norm]').forEach((a) => a.addEventListener('click', () => {
-  const r = radios.find((x) => x.value === a.dataset.norm);
-  if (!r) return;
-  r.checked = true;
-  clearNormError();
-  if (!step2.hidden) chosenNorm.textContent = r.value;
-}));
+/* ---------- Ponteiro: botões que puxam de leve e o globo que acompanha o mouse ---------- */
+run('ponteiro', () => {
+  if (!finePointer || reduceMotion) return;
+  $$('[data-magnetic]').forEach((el) => {
+    el.addEventListener('pointermove', (e) => {
+      const r = el.getBoundingClientRect();
+      const x = (e.clientX - (r.left + r.width / 2)) / r.width;
+      const y = (e.clientY - (r.top + r.height / 2)) / r.height;
+      el.style.translate = `${(x * 14).toFixed(1)}px ${(y * 10).toFixed(1)}px`;
+    });
+    el.addEventListener('pointerleave', () => { el.style.translate = ''; });
+  });
 
-/* Telefone: aceita +55, 0 de tronco e colagem; mantém o cursor no lugar */
-function phoneDigits(value) {
-  let d = value.replace(/\D/g, '');
-  if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
-  if (d.length > 11 && d.startsWith('0')) d = d.replace(/^0+/, '');
-  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
-  return d.slice(0, 11);
-}
-function formatPhone(d) {
-  if (d.length <= 2) return d.length ? `(${d}` : '';
-  if (d.length <= 6) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
-  return `(${d.slice(0, 2)}) ${d.slice(2, d.length - 4)}-${d.slice(-4)}`;
-}
-
-const phone = form.elements.whatsapp;
-phone.addEventListener('beforeinput', (e) => {
-  // Backspace logo depois de um separador apaga o dígito anterior, não o separador.
-  if (e.inputType !== 'deleteContentBackward' || phone.selectionStart !== phone.selectionEnd) return;
-  let pos = phone.selectionStart;
-  const v = phone.value;
-  if (pos > 0 && /\D/.test(v[pos - 1])) {
-    while (pos > 0 && /\D/.test(v[pos - 1])) pos -= 1;
-    phone.setSelectionRange(pos, pos);
-  }
-});
-phone.addEventListener('input', () => {
-  const caret = phone.selectionStart ?? phone.value.length;
-  const digitsBefore = phone.value.slice(0, caret).replace(/\D/g, '').length;
-  const digits = phoneDigits(phone.value);
-  const out = formatPhone(digits);
-  phone.value = out;
-  // Recoloca o cursor depois do mesmo número de dígitos.
-  let pos = 0;
-  let seen = 0;
-  const target = Math.min(digitsBefore, digits.length);
-  while (pos < out.length && seen < target) { if (/\d/.test(out[pos])) seen += 1; pos += 1; }
-  if (document.activeElement === phone) phone.setSelectionRange(pos, pos);
+  const orbit = $('[data-orbit]');
+  if (!hero || !orbit) return;
+  hero.addEventListener('pointermove', (e) => {
+    const r = hero.getBoundingClientRect();
+    orbit.style.setProperty('--mx', ((e.clientX - r.left) / r.width - 0.5).toFixed(3));
+    orbit.style.setProperty('--my', ((e.clientY - r.top) / r.height - 0.5).toFixed(3));
+  });
+  hero.addEventListener('pointerleave', () => {
+    orbit.style.setProperty('--mx', 0);
+    orbit.style.setProperty('--my', 0);
+  });
 });
 
-const validators = {
-  nome: (v) => v.trim().length >= 2,
-  empresa: (v) => v.trim().length >= 2,
-  whatsapp: (v) => phoneDigits(v).length >= 10,
-  consentimento: (_, el) => el.checked,
-};
-
-function validateField(el) {
-  const check = validators[el.name];
-  if (!check) return true;
-  const ok = check(el.value, el);
-  const error = document.getElementById(`${el.id}-error`);
-  el.setAttribute('aria-invalid', String(!ok));
-  if (error) error.hidden = ok;
-  // A mensagem de erro só descreve o campo enquanto existe erro.
-  if (ok) el.removeAttribute('aria-describedby');
-  else if (error) el.setAttribute('aria-describedby', error.id);
-  return ok;
-}
-
-Object.keys(validators).forEach((name) => {
-  const el = form.elements[name];
-  el.addEventListener('blur', () => { if (el.value || el.type === 'checkbox') validateField(el); });
-  el.addEventListener('input', () => { if (el.getAttribute('aria-invalid') === 'true') validateField(el); });
-  el.addEventListener('change', () => { if (el.type === 'checkbox') validateField(el); });
+/* ---------- Perguntas: uma aberta por vez, para a seção caber na tela ---------- */
+run('perguntas', () => {
+  const items = $$('[data-faq]');
+  const setOpen = (item, open) => {
+    item.classList.toggle('is-open', open);
+    const button = $('.faq-q', item);
+    if (button) button.setAttribute('aria-expanded', String(open));
+  };
+  items.forEach((item) => {
+    const button = $('.faq-q', item);
+    if (!button) return;
+    button.addEventListener('click', () => {
+      const open = !item.classList.contains('is-open');
+      items.forEach((other) => { if (other !== item) setOpen(other, false); });
+      setOpen(item, open);
+    });
+  });
 });
 
-function showSuccess(title, text) {
-  formProgress.style.setProperty('--step-p', 1);
-  form.hidden = true;
-  $('[data-success-title]', success).textContent = title;
-  $('[data-success-text]', success).textContent = text;
-  success.hidden = false;
-  success.focus();
-}
+/* ---------- Mensagem montada: a pessoa escolhe e vê o texto que vai enviar ---------- */
+run('mensagem', () => {
+  const composer = $('[data-composer]');
+  if (!composer) return;
+  const preview = $('[data-msg]', composer);
+  const bubble = $('[data-bubble]', composer);
+  const send = $('[data-send]', composer);
+  if (!preview || !bubble || !send) return;
+  const value = (name) => { const el = $(`input[name="${name}"]:checked`, composer); return el ? el.value : ''; };
+  let typing = 0;
+  const compose = (animate) => {
+    const norma = value('norma');
+    const prazo = value('prazo');
+    const text = `Olá! Quero um diagnóstico gratuito${norma ? ` ${norma}` : ''}.${prazo ? ` ${prazo}` : ''}`;
+    send.href = `https://wa.me/${WHATSAPP}?text=${encodeURIComponent(text)}`;   // o link nunca fica atrás do texto
+    window.clearTimeout(typing);
+    if (!animate || reduceMotion) { preview.textContent = text; bubble.classList.remove('is-typing'); return; }
+    bubble.classList.add('is-typing');
+    typing = window.setTimeout(() => {
+      preview.textContent = text;
+      bubble.classList.remove('is-typing');
+      if (bubble.animate) bubble.animate([{ transform: 'scale(0.9)' }, { transform: 'scale(1)' }], { duration: 460, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)' });
+    }, 460);
+  };
+  composer.addEventListener('change', () => compose(true));
+  compose(false);
+});
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  // Enter no passo 1 avança, em vez de validar campos ainda escondidos.
-  if (step2.hidden) { goToStep2(); return; }
-  status.textContent = '';
-
-  const invalid = Object.keys(validators).map((n) => form.elements[n]).filter((el) => !validateField(el));
-  if (invalid.length) { invalid[0].focus(); return; }
-
-  const data = Object.fromEntries(new FormData(form));
-  data.whatsapp = formatPhone(phoneDigits(data.whatsapp || ''));
-
-  if (CONFIG.formEndpoint) {
-    submitBtn.setAttribute('aria-busy', 'true');
-    submitBtn.disabled = true;
-    try {
-      const res = await fetch(CONFIG.formEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ ...data, consentimento: true, origem: window.location.href }),
-      });
-      if (!res.ok) throw new Error(String(res.status));
-      const when = CONFIG.responseTime ? ` em até ${CONFIG.responseTime}` : '';
-      showSuccess('Recebemos seu pedido.', `A DLC vai falar com você${when} pelo WhatsApp informado para marcar o diagnóstico.`);
-    } catch {
-      status.textContent = 'Não foi possível enviar agora. Tente de novo em instantes ou chame no WhatsApp (31) 97317-0620.';
-    } finally {
-      submitBtn.removeAttribute('aria-busy');
-      submitBtn.disabled = false;
-    }
-    return;
-  }
-
-  if (CONFIG.whatsapp) {
-    const text = [
-      'Olá, quero um diagnóstico ISO gratuito.',
-      `Norma: ${data.norma}`,
-      `Nome: ${data.nome}`,
-      `Empresa: ${data.empresa}`,
-      `WhatsApp: ${data.whatsapp}`,
-      data.funcionarios && `Funcionários: ${data.funcionarios}`,
-      data.prazo && `Prazo: ${data.prazo}`,
-    ].filter(Boolean).join('\n');
-    // Sem a flag "noopener" (com ela window.open sempre devolve null); o opener é cortado à mão.
-    const win = window.open(waUrl(text), '_blank');
-    if (win) win.opener = null;
-    else window.location.href = waUrl(text);
-    showSuccess('Falta só enviar.', 'Abrimos o WhatsApp da DLC com a sua mensagem pronta. O pedido chega quando você tocar em enviar.');
-    return;
-  }
-
-  status.textContent = 'O envio deste formulário ainda não foi configurado.';
+/* ---------- Números que contam (página Sobre) ---------- */
+run('numeros', () => {
+  const counters = $$('[data-count]');
+  if (!counters.length || reduceMotion || !('IntersectionObserver' in window)) return;
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      io.unobserve(entry.target);
+      const el = entry.target;
+      const end = Number(el.dataset.count);
+      if (!Number.isFinite(end)) return;
+      const t0 = performance.now();
+      const tick = (now) => {
+        const t = clamp((now - t0) / 1400, 0, 1);
+        el.textContent = Math.round(end * (1 - Math.pow(1 - t, 3)));
+        if (t < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+  }, { threshold: 0.6 });
+  counters.forEach((el) => io.observe(el));
 });
 
 /* ---------- Ano no rodapé ---------- */
-const year = $('[data-year]');
-if (year) year.textContent = new Date().getFullYear();
+run('ano', () => { $$('[data-year]').forEach((el) => { el.textContent = new Date().getFullYear(); }); });
+
+// Só agora avisa o <head> de que tudo carregou (senão a página volta ao modo sem animação).
+window.__dlc = true;
+
+})();
