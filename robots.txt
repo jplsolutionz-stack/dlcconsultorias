@@ -1,0 +1,6 @@
+# DLC Consultoria & Certificações ISO
+# Todo o site pode ser lido por buscadores e assistentes de IA.
+User-agent: *
+Allow: /
+
+Sitemap: https://www.dlcconsultoria.com.br/sitemap.xml

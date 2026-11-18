@@ -752,7 +752,15 @@ a.orbit-tag:hover { scale: 1.05; }
 .cookie-banner p { font-size: var(--t-small); }
 .cookie-banner a { font-weight: 600; }
 .cookie-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.cookie-actions .btn { flex: 1 1 140px; }
+.cookie-actions .btn { flex: 1 1 120px; }
+.cookie-banner { max-height: calc(100svh - 24px); overflow-y: auto; animation: cookie-in 500ms var(--ease); }
+.cookie-cats { display: grid; gap: 8px; }
+.cookie-cat { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: 16px; background: var(--tint); font-size: var(--t-small); line-height: 1.4; cursor: pointer; }
+.cookie-cat input { flex-shrink: 0; width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--green); cursor: pointer; }
+.cookie-cat--fixa { cursor: default; background: transparent; padding-block: 4px; }
+.cookie-link { margin-top: -4px; }
+@keyframes cookie-in { from { opacity: 0; transform: translateY(16px); } }
+.rm .cookie-banner { animation: none; }
 
 /* ---------- Página de privacidade ---------- */
 
